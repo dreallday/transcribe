@@ -47,8 +47,9 @@ def main():
             print(line, file=sys.stderr)
             lines.append(line)
 
-        f.with_suffix(".txt").write_text("\n\n".join(lines) + "\n", encoding="utf-8")
-        print(f"-> {f.with_suffix('.txt')}", file=sys.stderr)
+        out = f.with_suffix(f"{f.suffix}.txt")
+        out.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+        print(f"-> {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":

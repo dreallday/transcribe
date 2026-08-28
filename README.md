@@ -1,7 +1,8 @@
 # transcribe
 
 Meeting transcription with [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
-Any format ffmpeg reads: wav, mp3, m4a, flac, mp4, mkv.
+Audio or video, any format ffmpeg reads: wav, mp3, m4a, flac, mp4, mkv, mov, webm.
+Video needs no extra step - the audio track is pulled straight out of the container.
 
 ## Setup
 
@@ -16,10 +17,10 @@ Needs `ffmpeg` on PATH. The two `nvidia-*` packages are GPU-only; skip on a CPU-
 ```bash
 .venv/bin/python transcribe.py meeting.wav                    # autodetect device + language
 .venv/bin/python transcribe.py -d cuda -c float16 meeting.wav # GPU, fastest
-.venv/bin/python transcribe.py -l en *.m4a                    # force language, batch of files
+.venv/bin/python transcribe.py -l en *.mp4                    # force language, batch of files
 ```
 
-Writes `meeting.txt` next to the input: `[HH:MM:SS] text` paragraphs, one per ~30s chunk.
+Writes `meeting.wav.txt` next to the input: `[HH:MM:SS] text` paragraphs, one per ~30s chunk.
 Same lines stream to stderr while it runs.
 
 | flag | default | notes |

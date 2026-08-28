@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.txt
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.flac
