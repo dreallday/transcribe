@@ -2,8 +2,12 @@
 """Transcribe audio/video files with faster-whisper. Any format ffmpeg reads."""
 import argparse
 import ctypes
+import subprocess
 import sys
 from pathlib import Path
+
+import av
+import numpy as np
 
 # ctranslate2 dlopens libcublas/libcudnn by soname; pip wheels hide them in
 # site-packages/nvidia/*/lib, which the loader does not search. Preload by path,
@@ -18,6 +22,26 @@ from faster_whisper import BatchedInferencePipeline, WhisperModel
 from faster_whisper.utils import format_timestamp
 
 
+def audio_streams(path):
+    """[(index, codec, language, title)] for every audio track in the container."""
+    with av.open(str(path), metadata_errors="ignore") as container:
+        return [(i, s.codec_context.name, s.metadata.get("language", "und"),
+                 s.metadata.get("title", ""))
+                for i, s in enumerate(container.streams.audio)]
+
+
+def decode_stream(path, index):
+    """faster-whisper always decodes audio stream 0, so pull the wanted one via ffmpeg."""
+    r = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", f"0:a:{index}",
+         "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if r.returncode or not r.stdout:
+        sys.exit(f"ffmpeg failed on stream {index} of {path}: {r.stderr.decode().strip()}")
+    return np.frombuffer(r.stdout, np.int16).astype(np.float32) / 32768.0
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("files", nargs="+", type=Path)
@@ -27,6 +51,8 @@ def main():
     p.add_argument("-c", "--compute-type", default="default",
                    help="int8, int8_float16, float16, float32")
     p.add_argument("-b", "--batch-size", type=int, default=16, help="lower if VRAM runs out")
+    p.add_argument("-s", "--stream", type=int, default=None,
+                   help="audio stream index to transcribe (default: 0). Listed per file")
     args = p.parse_args()
 
     model = BatchedInferencePipeline(
@@ -37,7 +63,19 @@ def main():
         if not f.is_file():
             print(f"skip (not a file): {f}", file=sys.stderr)
             continue
-        segments, info = model.transcribe(str(f), language=args.language,
+        streams = audio_streams(f)
+        if not streams:
+            print(f"skip (no audio stream): {f}", file=sys.stderr)
+            continue
+        if len(streams) > 1:
+            for i, codec, lang, title in streams:
+                mark = "*" if i == (args.stream or 0) else " "
+                print(f" {mark} stream {i}: {codec} {lang} {title}".rstrip(), file=sys.stderr)
+        if args.stream is not None and args.stream >= len(streams):
+            sys.exit(f"{f}: no audio stream {args.stream}, file has {len(streams)}")
+
+        audio = str(f) if args.stream in (None, 0) else decode_stream(f, args.stream)
+        segments, info = model.transcribe(audio, language=args.language,
                                           batch_size=args.batch_size)
         print(f"== {f.name} [{info.language} {info.duration:.0f}s]", file=sys.stderr)
 
@@ -47,7 +85,11 @@ def main():
             print(line, file=sys.stderr)
             lines.append(line)
 
-        out = f.with_suffix(f"{f.suffix}.txt")
+        if not lines:
+            print("no speech found - wrong stream?", file=sys.stderr)
+        # per-stream name so transcribing both tracks of a call does not overwrite
+        tag = f".a{args.stream or 0}" if len(streams) > 1 else ""
+        out = f.with_suffix(f"{f.suffix}{tag}.txt")
         out.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
         print(f"-> {out}", file=sys.stderr)
 
