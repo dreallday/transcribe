@@ -3,6 +3,7 @@
 import argparse
 import atexit
 import ctypes
+import json
 import os
 import queue
 import re
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 import av
@@ -181,7 +183,7 @@ public static class DefaultCapture {
 
 def windows_default_endpoint() -> str | None:
     """GUID of the Windows default recording device, or None."""
-    script = Path(tempfile.gettempdir()) / "dictate_default_device.ps1"
+    script = Path(tempfile.gettempdir()) / "morbo_default_device.ps1"
     script.write_text(DEFAULT_ENDPOINT_PS, encoding="utf-8")
     try:
         out = subprocess.run(
@@ -280,6 +282,265 @@ def make_typer():
     sys.exit("--type needs powershell.exe (WSL/Windows), xdotool or wtype")
 
 
+# --- model cache ------------------------------------------------------------
+
+
+def model_cache() -> Path:
+    """The HuggingFace hub directory the models are downloaded into."""
+    if hub := os.environ.get("HF_HUB_CACHE"):
+        return Path(hub)
+    home = os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface"
+    return Path(home) / "hub"
+
+
+def cached_models() -> dict[str, int]:
+    """{model name: bytes on disk} for every whisper model already downloaded.
+
+    Sizes do not follow symlinks: on Linux the snapshot files point at the blobs, and
+    counting both would report double what the model actually occupies.
+    """
+    models = {}
+    for repo in sorted(model_cache().glob("models--*--faster-whisper-*")):
+        name = repo.name.split("faster-whisper-", 1)[1]
+        models[name] = sum(f.stat(follow_symlinks=False).st_size
+                           for f in repo.rglob("*") if f.is_file())
+    return models
+
+
+def delete_cached_model(name: str) -> None:
+    """Remove a downloaded model. It is only a cache - using it again downloads it again."""
+    for repo in model_cache().glob(f"models--*--faster-whisper-{name}"):
+        shutil.rmtree(repo, ignore_errors=True)
+
+
+def human_size(size: int) -> str:
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+# --- saved settings ---------------------------------------------------------
+
+
+def settings_file() -> Path:
+    """Where the panel remembers its settings: beside the program, so the whole app stays
+    in one folder you can move or delete. $MORBO_SETTINGS overrides it."""
+    if override := os.environ.get("MORBO_SETTINGS"):
+        return Path(override)
+    home = Path(sys.executable).parent if getattr(sys, "frozen", False) else HERE
+    return home / "settings.json"
+
+
+def load_settings() -> dict:
+    """Saved settings, or {} if there are none yet or the file is unreadable."""
+    try:
+        return json.loads(settings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(values: dict) -> None:
+    path = settings_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(values, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError as e:
+        print(f"could not save settings to {path}: {e}", file=sys.stderr)
+
+
+def apply_saved(args, parser, saved: dict) -> None:
+    """Fill in saved values, but never override a flag given on the command line.
+
+    An option still holding its parser default was not typed by the user, so the saved
+    value wins there. Anything else the user asked for explicitly stays.
+    """
+    for key, value in saved.items():
+        if hasattr(args, key) and getattr(args, key) == parser.get_default(key):
+            setattr(args, key, value)
+
+
+# --- global hotkey ----------------------------------------------------------
+
+MODIFIERS = {"alt": 0x1, "ctrl": 0x2, "control": 0x2, "shift": 0x4, "win": 0x8}
+NAMED_KEYS = {"space": 0x20, "enter": 0x0D, "tab": 0x09, "esc": 0x1B, "escape": 0x1B,
+              "backspace": 0x08, "insert": 0x2D, "delete": 0x2E, "home": 0x24, "end": 0x23,
+              "pageup": 0x21, "pagedown": 0x22, "left": 0x25, "up": 0x26, "right": 0x27,
+              "down": 0x28, "pause": 0x13, "capslock": 0x14, "printscreen": 0x2C}
+# left and right are left alone on purpose - binding them would break the mouse
+MOUSE_BUTTONS = {"m3": 3, "middle": 3, "mouse3": 3,
+                 "m4": 4, "x1": 4, "back": 4, "mouse4": 4,
+                 "m5": 5, "x2": 5, "forward": 5, "mouse5": 5}
+
+
+@dataclass(frozen=True)
+class Hotkey:
+    """A parsed hotkey: modifiers plus either a keyboard key or a mouse button."""
+    mods: int                    # MOD_ALT/CONTROL/SHIFT/WIN flags
+    key: int | None = None       # virtual key code
+    button: int | None = None    # 3 = middle, 4 = back/X1, 5 = forward/X2
+
+
+def parse_hotkey(spec: str) -> Hotkey:
+    """"ctrl+alt+space" or "ctrl+m4" -> the modifiers and the key or mouse button."""
+    mods, key, button = 0, None, None
+    for part in spec.lower().replace(" ", "").split("+"):
+        if part in MODIFIERS:
+            mods |= MODIFIERS[part]
+        elif part in MOUSE_BUTTONS:
+            button = MOUSE_BUTTONS[part]
+        elif part in ("m1", "m2", "mouse1", "mouse2", "left", "right"):
+            raise ValueError("the left and right mouse buttons cannot be bound")
+        elif part in NAMED_KEYS:
+            key = NAMED_KEYS[part]
+        elif m := re.fullmatch(r"f([1-9]|1[0-2])", part):
+            key = 0x70 + int(m.group(1)) - 1
+        elif len(part) == 1:
+            key = ord(part.upper())  # letters and digits use their ASCII value
+        else:
+            raise ValueError(f"unknown key in hotkey: {part!r}")
+    if key is None and button is None:
+        raise ValueError(f"hotkey {spec!r} has modifiers but no key")
+    if key is not None and button is not None:
+        raise ValueError(f"hotkey {spec!r} mixes a key and a mouse button")
+    return Hotkey(mods, key, button)
+
+
+def _bind_key(hotkey: Hotkey):
+    """Register a keyboard hotkey; returns the release callable, or None if it is taken."""
+    user32 = ctypes.windll.user32
+    # 0x4000 is MOD_NOREPEAT: holding the keys down fires once, not continuously
+    if not user32.RegisterHotKey(None, 1, hotkey.mods | 0x4000, hotkey.key):
+        return None
+    return lambda: user32.UnregisterHotKey(None, 1)
+
+
+def _bind_mouse(hotkey: Hotkey, pressed):
+    """Watch for a mouse button with a low-level hook - RegisterHotKey is keyboard only.
+
+    The hook sees every mouse message, but it only ever looks at which button changed:
+    nothing is recorded, and everything except the bound button passes straight through.
+    The bound press is swallowed, so it stops doing whatever it normally does.
+    """
+    import ctypes.wintypes as wintypes
+
+    class MSLLHOOKSTRUCT(ctypes.Structure):
+        _fields_ = [("pt", wintypes.POINT), ("mouseData", wintypes.DWORD),
+                    ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+    user32 = ctypes.windll.user32
+    down = {0x0207: "middle", 0x020B: "x"}  # WM_MBUTTONDOWN, WM_XBUTTONDOWN
+    up = {0x0208: "middle", 0x020C: "x"}    # WM_MBUTTONUP, WM_XBUTTONUP
+    held = set()
+
+    def modifiers_match() -> bool:
+        """Exactly the modifiers in the spec are down - no more, no less."""
+        for flag, keys in ((0x2, (0x11,)), (0x1, (0x12,)), (0x4, (0x10,)), (0x8, (0x5B, 0x5C))):
+            pressed_now = any(user32.GetAsyncKeyState(k) & 0x8000 for k in keys)
+            if bool(hotkey.mods & flag) != pressed_now:
+                return False
+        return True
+
+    def button_of(message: int, info) -> int | None:
+        kind = down.get(message) or up.get(message)
+        if kind == "middle":
+            return 3
+        if kind == "x":
+            return 4 if (info.mouseData >> 16) == 1 else 5  # XBUTTON1 / XBUTTON2
+        return None
+
+    def hook(code, message, lparam):
+        if code == 0:
+            info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            if button_of(message, info) == hotkey.button:
+                if message in down and modifiers_match():
+                    held.add(hotkey.button)
+                    pressed()
+                    return 1  # swallow it, so the button does not also do its usual job
+                if message in up and hotkey.button in held:
+                    held.discard(hotkey.button)
+                    return 1  # ... and swallow the release that belongs to it
+        return user32.CallNextHookEx(None, code, message, lparam)
+
+    # the prototypes matter: without them ctypes hands back handles truncated to int,
+    # and SetWindowsHookExW then fails with nothing to show for it
+    hook_type = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
+                                   wintypes.WPARAM, wintypes.LPARAM)
+    user32.SetWindowsHookExW.argtypes = [ctypes.c_int, hook_type,
+                                         wintypes.HINSTANCE, wintypes.DWORD]
+    user32.SetWindowsHookExW.restype = wintypes.HHOOK
+    user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int,
+                                      wintypes.WPARAM, wintypes.LPARAM]
+    user32.CallNextHookEx.restype = ctypes.c_ssize_t
+    user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+
+    proc = hook_type(hook)
+    handle = user32.SetWindowsHookExW(14, proc, None, 0)  # 14 is WH_MOUSE_LL
+    if not handle:
+        print(f"mouse hook failed, error {ctypes.get_last_error()}", file=sys.stderr)
+        return None
+
+    def release() -> None:
+        user32.UnhookWindowsHookEx(handle)
+
+    # Windows calls into proc, so it has to outlive this function - hang it on release
+    release.callback = proc
+    return release
+
+
+def watch_hotkey(spec: str, pressed, on_status=None):
+    """Call pressed() whenever the hotkey is hit, whatever window has focus.
+
+    Accepts keyboard combinations ("ctrl+alt+m") and the mouse buttons that are not the
+    left or right one ("m4", "ctrl+m3"). Returns unbind(), which releases it again.
+    on_status(ok, message) reports whether it bound. Windows only.
+    """
+    def report(ok: bool, message: str):
+        print(message, file=sys.stderr)
+        if on_status:
+            on_status(ok, message)
+        return lambda: None
+
+    if sys.platform != "win32":
+        return report(False, f"hotkey {spec} needs Windows - ignored")
+    try:
+        hotkey = parse_hotkey(spec)
+    except ValueError as e:
+        return report(False, str(e))
+
+    thread_id = queue.Queue()
+
+    def pump() -> None:
+        import ctypes.wintypes
+        user32 = ctypes.windll.user32
+        release = _bind_mouse(hotkey, pressed) if hotkey.button else _bind_key(hotkey)
+        if release is None:
+            thread_id.put(None)
+            report(False, f"{spec} could not be bound" if hotkey.button
+                   else f"hotkey {spec} is already taken by another program")
+            return
+        thread_id.put(ctypes.windll.kernel32.GetCurrentThreadId())
+        report(True, f"hotkey {spec} toggles the microphone")
+        msg = ctypes.wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == 0x0312:  # WM_HOTKEY, the keyboard path
+                pressed()
+        release()
+
+    # its own thread: both a hotkey and a low-level hook deliver to the thread that set them
+    # up, so the message loop has to live there, and it must not block the UI
+    threading.Thread(target=pump, daemon=True).start()
+    tid = thread_id.get(timeout=5)
+
+    def unbind() -> None:
+        if tid:  # WM_QUIT ends the loop, which releases the key or the hook
+            ctypes.windll.user32.PostThreadMessageW(tid, 0x0012, 0, 0)
+
+    return unbind
+
+
 # --- live capture -----------------------------------------------------------
 
 
@@ -291,12 +552,13 @@ def open_capture(args) -> tuple[subprocess.Popen, queue.Queue]:
     """
     fmt = args.input_format or {"linux": "pulse", "darwin": "avfoundation",
                                 "win32": "dshow"}.get(sys.platform, "pulse")
-    if fmt == "dshow":
-        args.input = dshow_input(args.input)
+    # resolved locally, never written back: args.input stays what the user chose, so
+    # "default" keeps following the system default instead of hardening into one device
+    source = dshow_input(args.input) if fmt == "dshow" else args.input
     # a file standing in for the mic has to be paced, or it floods in at decode speed
     rate = [] if fmt in ("pulse", "dshow", "avfoundation") else ["-re"]
     proc = subprocess.Popen(
-        [FFMPEG, "-nostdin", "-v", "error", *rate, "-f", fmt, "-i", args.input,
+        [FFMPEG, "-nostdin", "-v", "error", *rate, "-f", fmt, "-i", source,
          "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-"],
         stdout=subprocess.PIPE, **NO_WINDOW,
     )
@@ -308,7 +570,7 @@ def open_capture(args) -> tuple[subprocess.Popen, queue.Queue]:
         blocks.put(None)  # end of stream
 
     threading.Thread(target=pump, daemon=True).start()
-    print(f"listening on {fmt}:{args.input} - ctrl-c to stop", file=sys.stderr)
+    print(f"listening on {fmt}:{source} - ctrl-c to stop", file=sys.stderr)
     return proc, blocks
 
 

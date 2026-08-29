@@ -1,5 +1,5 @@
-# PyInstaller spec for the Windows build. From the build dir: pyinstaller dictate.spec
-# Produces dist/dictate/dictate.exe (onedir - onefile would re-extract the CUDA libraries on
+# PyInstaller spec for the Windows build. From the build dir: pyinstaller morbo.spec
+# Produces dist/morbo/morbo.exe (onedir - onefile would re-extract the CUDA libraries on
 # every launch). Model weights are NOT bundled; they download to the HF cache on first run.
 import os
 import shutil
@@ -9,7 +9,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
 # The only CUDA libraries a transcription actually loads, measured by listing the modules of
-# a running dictate.exe. Everything else the wheels ship - the cuDNN engines, ops, adv and
+# a running morbo.exe. Everything else the wheels ship - the cuDNN engines, ops, adv and
 # nvrtc - is never touched by ctranslate2's whisper path and costs 1 GB.
 # If a future model or compute type fails with "Library ... is not found", add it here.
 CUDA_KEEP = {"cublas64_12.dll", "cublaslt64_12.dll"}
@@ -51,7 +51,7 @@ def keep(dest):
 
 
 a = Analysis(
-    ["gui.py"],
+    ["morbo.py"],
     pathex=["."],
     binaries=binaries,
     datas=datas,
@@ -61,7 +61,7 @@ a = Analysis(
 a.binaries = [entry for entry in a.binaries if keep(entry[0])]
 
 pyz = PYZ(a.pure)
-# DICTATE_CONSOLE=1 builds a console exe so startup errors are visible
-exe = EXE(pyz, a.scripts, exclude_binaries=True, name="dictate",
-          console=bool(os.environ.get("DICTATE_CONSOLE")))
-coll = COLLECT(exe, a.binaries, a.datas, name="dictate")
+# MORBO_CONSOLE=1 builds a console exe so startup errors are visible
+exe = EXE(pyz, a.scripts, exclude_binaries=True, name="morbo",
+          console=bool(os.environ.get("MORBO_CONSOLE")))
+coll = COLLECT(exe, a.binaries, a.datas, name="morbo")

@@ -1,6 +1,11 @@
-# transcribe
+# Morbo
 
-Meeting transcription with [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
+Meeting transcription and dictation with
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper). Named after the Futurama news
+anchor, because it listens to everything you say and repeats it back at you.
+
+`transcribe.py` is the engine (files, microphone, typing); `morbo.py` is the floating panel
+built on it, and the thing the Windows build ships as `morbo.exe`.
 
 ## Setup
 
@@ -146,14 +151,15 @@ knowing:
 
 ## Panel
 
-`gui.py` is a small floating panel over the dictation loop: a mic button that starts and
+`morbo.py` is a small floating panel over the dictation loop: a mic button that starts and
 stops transcribing, the last recognised sentence, and a close button. The model is loaded
 once at startup and stays warm, so the mic button toggles instantly.
 
 ```bash
-.venv/bin/python gui.py                    # same flags as transcribe.py, --mic --type implied
-.venv/bin/python gui.py --no-type          # transcribe into the panel only, type nothing
-.venv/bin/python gui.py --start-listening  # mic already on at launch
+.venv/bin/python morbo.py                    # same flags as transcribe.py, --mic --type implied
+.venv/bin/python morbo.py --no-type          # transcribe into the panel only, type nothing
+.venv/bin/python morbo.py --start-listening  # mic already on at launch
+.venv/bin/python morbo.py --hotkey none       # no global hotkey
 ```
 
 Feeding it a file instead of a microphone (`--input-format wav -i talk.wav`) replays that
@@ -163,6 +169,37 @@ The sentence being spoken appears in dim italic and is replaced by the committed
 when you pause. The bar under the mic is a live input meter (20 updates a second, fast attack and slow
 decay) - it moves even while paused, so you can confirm a device is actually hearing you
 before you start.
+
+**`ctrl+alt+m` from any window** starts and stops transcribing, so you never have to click
+the panel and lose the focus of the textbox you are dictating into. Change it in the
+settings, or pass `--hotkey "ctrl+shift+space"` / `--hotkey none`. If the combination is
+already taken by another program the panel says so and stays clickable.
+
+Mouse buttons work too - `m3` (middle), `m4` (back), `m5` (forward), on their own or with
+modifiers (`ctrl+m4`). Left and right are refused: binding them would break the mouse. A
+bound button is swallowed while the panel runs, so `m3` stops pasting or autoscrolling until
+you unbind it. Keyboard combinations go through `RegisterHotKey`; mouse buttons need a
+low-level hook, which sees mouse messages but only ever reads which button changed - nothing
+is recorded, and every other button passes straight through.
+
+The cog next to the close button holds the rest: the hotkey, whether finished sentences are
+typed into the focused window, the pause / preview / silence values (live, no restart), and
+the model.
+
+Picking a different model reloads it in place - no restart. Under it sits what you have
+downloaded, with sizes and a total, and a delete button for everything except the model in
+use (it asks first). A model you have never used is downloaded on first selection.
+
+**The window stops repainting while a model loads.** The ctranslate2 loader holds Python's
+GIL, so nothing redraws until it finishes - a second or two for a cached model, minutes for
+a first download of `large-v3-turbo` (1.5 GB). It is not hung.
+
+Settings survive restarts. Changing anything in the cog writes the current configuration to
+`settings.json` **next to `morbo.exe`** (next to `transcribe.py` when run from source, or
+wherever `$MORBO_SETTINGS` points) - so the app stays one movable folder, and note that
+this snapshots *everything*, including options you passed on the command line for that run. A flag given on the command line always
+wins over the saved value, so `--hotkey none` still works for a single run, and deleting the
+file resets everything to defaults.
 
 The input dropdown lists the real capture devices (dshow on Windows, pulse sources on
 Linux). Switching reopens ffmpeg on the new device without reloading the model, so it takes
@@ -190,19 +227,19 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
 That makes a venv, installs the requirements plus `pywebview` and `pyinstaller`, and runs
-`dictate.spec`. Output is `dist\dictate\dictate.exe` plus its folder - copy the whole
+`dictate.spec`. Output is `dist\morbo\morbo.exe` plus its folder - copy the whole
 folder, not just the exe.
 
 What is inside: ffmpeg, the two CUDA libraries a transcription actually loads (cuBLAS and
 cuBLASLt - the cuDNN engines the wheels ship are never touched by ctranslate2's whisper
-path, and `dictate.spec` drops them), and the NiceGUI and faster-whisper assets. What is not: the model weights, which download to
+path, and `morbo.spec` drops them), and the NiceGUI and faster-whisper assets. What is not: the model weights, which download to
 `%USERPROFILE%\.cache\huggingface` on first launch - so the first start needs a network
 connection and a minute of patience.
 
 It is a onedir build on purpose. `--onefile` would unpack the CUDA libraries into a temp
 folder on every single launch. Expect ~1.3 GB on disk, mostly cuBLASLt.
 
-Debugging a build that dies on startup: `$env:DICTATE_CONSOLE='1'` before `pyinstaller`
+Debugging a build that dies on startup: `$env:MORBO_CONSOLE='1'` before `pyinstaller`
 makes a console exe so the traceback is visible instead of vanishing with the window.
 
 ## Flags
