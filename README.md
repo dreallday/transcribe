@@ -175,6 +175,11 @@ the panel and lose the focus of the textbox you are dictating into. Change it in
 settings, or pass `--hotkey "ctrl+shift+space"` / `--hotkey none`. If the combination is
 already taken by another program the panel says so and stays clickable.
 
+In the settings, **press a key** records the next combination you press, and the `m3` /
+`m4` / `m5` / `none` buttons next to it are one-click shortcuts. The text field still takes
+a typed spec, applied once you stop typing; anything that does not parse is rejected and the
+field snaps back to the binding you had.
+
 Mouse buttons work too - `m3` (middle), `m4` (back), `m5` (forward), on their own or with
 modifiers (`ctrl+m4`). Left and right are refused: binding them would break the mouse. A
 bound button is swallowed while the panel runs, so `m3` stops pasting or autoscrolling until

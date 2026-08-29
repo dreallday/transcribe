@@ -15,6 +15,11 @@ from nicegui import app, ui  # noqa: E402
 import transcribe  # noqa: E402
 
 PORT = 8171
+# what the browser calls a key, in the words parse_hotkey understands
+KEY_NAMES = {" ": "space", "Escape": "esc", "ArrowLeft": "left", "ArrowRight": "right",
+             "ArrowUp": "up", "ArrowDown": "down", "PageUp": "pageup", "PageDown": "pagedown",
+             "Enter": "enter", "Tab": "tab", "Backspace": "backspace", "Delete": "delete",
+             "Insert": "insert", "Home": "home", "End": "end"}
 SIZE = (400, 158)          # the panel alone
 SIZE_SETTINGS = (400, 560)  # ... and with the settings open
 # a real frameless window where pywebview is installed (the Windows build), browser otherwise
@@ -55,6 +60,7 @@ class State:
     text: str = ""            # last committed sentence
     partial: str = ""         # sentence still being spoken
     level: float = 0.0        # input level, 0-1
+    recording: bool = False   # waiting for the user to press a new hotkey
     inputs: dict = field(default_factory=dict)  # device value -> label
     capture: dict = field(default_factory=dict)  # holds the running ffmpeg process
     hotkey_error: str = ""    # why the hotkey did not bind, if it did not
@@ -127,14 +133,22 @@ def set_hotkey(spec: str, save: bool = True) -> None:
     """Rebind the global hotkey while running. save=False for the initial bind, so simply
     launching with a flag does not write it into the saved settings."""
     global unbind_hotkey
+    spec = spec.strip()
+    off = spec.lower() in ("none", "off", "")
+    if not off:
+        try:  # a spec that does not parse keeps the current binding instead of losing it
+            transcribe.parse_hotkey(spec)
+        except ValueError as e:
+            state.hotkey_error = str(e)
+            return
     if unbind_hotkey:
         unbind_hotkey()
         unbind_hotkey = None
-    panel.hotkey = spec = spec.strip()
+    panel.hotkey = spec
     state.hotkey_error = ""
     if save:
         remember()
-    if spec.lower() in ("none", "off", ""):
+    if off:
         return
     unbind_hotkey = transcribe.watch_hotkey(
         spec, toggle_mic,
@@ -224,11 +238,52 @@ def settings() -> None:
         with menu, ui.column().classes("gap-2 w-full"):
             ui.label("SETTINGS").classes("text-[10px] tracking-widest text-grey-6")
 
-            ui.input("Global hotkey", value=panel.hotkey,
-                     on_change=lambda e: set_hotkey(e.value)) \
-                .props("dense outlined").classes("w-full text-xs") \
+            hotkey_field = ui.input("Global hotkey", value=panel.hotkey,
+                                    on_change=lambda e: apply_hotkey(e.value)) \
+                .props("dense outlined debounce=700").classes("w-full text-xs") \
                 .tooltip('ctrl / alt / shift / win plus a key, or a mouse button: '
                          'm3 middle, m4 back, m5 forward. "none" turns it off')
+
+            def apply_hotkey(spec: str) -> None:
+                set_hotkey(spec)
+                hotkey_field.value = panel.hotkey  # a rejected spec snaps back
+
+            def recorded(event) -> None:
+                """The next key pressed becomes the hotkey."""
+                if not state.recording or not event.action.keydown:
+                    return
+                name = event.key.name
+                if name in ("Control", "Alt", "Shift", "Meta"):
+                    return  # a modifier on its own is not a hotkey - wait for the real key
+                mods = [word for word, held in (("ctrl", event.modifiers.ctrl),
+                                                ("alt", event.modifiers.alt),
+                                                ("shift", event.modifiers.shift),
+                                                ("win", event.modifiers.meta)) if held]
+                stop_recording()
+                apply_hotkey("+".join([*mods, KEY_NAMES.get(name, name.lower())]))
+
+            keyboard = ui.keyboard(on_key=recorded, active=False)
+
+            def stop_recording() -> None:
+                state.recording = False
+                keyboard.active = False
+
+            def start_recording() -> None:
+                state.recording = True
+                keyboard.active = True
+
+            with ui.row().classes("items-center gap-1 no-wrap w-full"):
+                ui.button("press a key", icon="keyboard", on_click=start_recording) \
+                    .props("flat dense size=sm color=grey-5").classes("text-[10px]") \
+                    .bind_text_from(state, "recording",
+                                    lambda on: "waiting..." if on else "press a key")
+                ui.space()
+                for button, tip in (("m3", "middle"), ("m4", "back"), ("m5", "forward")):
+                    ui.button(button, on_click=lambda b=button: apply_hotkey(b)) \
+                        .props("flat dense size=sm color=grey-5").classes("text-[10px]") \
+                        .tooltip(f"{tip} mouse button")
+                ui.button("none", on_click=lambda: apply_hotkey("none")) \
+                    .props("flat dense size=sm color=grey-5").classes("text-[10px]")
             ui.label().bind_text_from(state, "hotkey_error").classes("text-[10px] text-red-4")
 
             ui.switch("Type into the focused window", value=args.type,
