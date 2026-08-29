@@ -126,14 +126,11 @@ permission for the terminal app). A quiet-but-audible file means lower `--thresh
 ## Dictation - type into whatever textbox has focus
 
 ```bash
-./dictate.sh                     # start it, click into any textbox, talk
-./dictate.sh -l en               # same, language pinned
-```
-
-That is `transcribe.py --mic --type` with the GPU flags. Every finished sentence (same pause
+.venv/bin/python transcribe.py --mic --type -d cuda -c float16
+``` Every finished sentence (same pause
 rule as above) is inserted into the window that currently has focus - browser, editor, chat,
 anything. Nothing is typed while you are mid-sentence, and Enter is never sent, so it cannot
-submit a form or run a command by itself. Ctrl-c stops.
+submit a form or run a command by itself. Ctrl-c stops. The panel (below) is the same thing with a mic button.
 
 How the text gets there: on Windows/WSL through `powershell.exe` (SendKeys `^v`), on Linux
 through `xdotool` or `wtype`. One long-lived shell is kept open, so a sentence lands in
@@ -154,10 +151,16 @@ stops transcribing, the last recognised sentence, and a close button. The model 
 once at startup and stays warm, so the mic button toggles instantly.
 
 ```bash
-.venv/bin/python gui.py           # same flags as transcribe.py, --mic --type are implied
+.venv/bin/python gui.py                    # same flags as transcribe.py, --mic --type implied
+.venv/bin/python gui.py --no-type          # transcribe into the panel only, type nothing
+.venv/bin/python gui.py --start-listening  # mic already on at launch
 ```
 
-The bar under the mic is a live input meter (20 updates a second, fast attack and slow
+Feeding it a file instead of a microphone (`--input-format wav -i talk.wav`) replays that
+file at real time, which is a good way to see the panel work without talking.
+
+The sentence being spoken appears in dim italic and is replaced by the committed version
+when you pause. The bar under the mic is a live input meter (20 updates a second, fast attack and slow
 decay) - it moves even while paused, so you can confirm a device is actually hearing you
 before you start.
 
@@ -190,13 +193,14 @@ That makes a venv, installs the requirements plus `pywebview` and `pyinstaller`,
 `dictate.spec`. Output is `dist\dictate\dictate.exe` plus its folder - copy the whole
 folder, not just the exe.
 
-What is inside: ffmpeg, the CUDA runtime (cuBLAS + cuDNN, the bulk of the size), and the
-NiceGUI and faster-whisper assets. What is not: the model weights, which download to
+What is inside: ffmpeg, the two CUDA libraries a transcription actually loads (cuBLAS and
+cuBLASLt - the cuDNN engines the wheels ship are never touched by ctranslate2's whisper
+path, and `dictate.spec` drops them), and the NiceGUI and faster-whisper assets. What is not: the model weights, which download to
 `%USERPROFILE%\.cache\huggingface` on first launch - so the first start needs a network
 connection and a minute of patience.
 
-It is a onedir build on purpose. `--onefile` would unpack a gigabyte of CUDA DLLs into a
-temp folder on every single launch. Expect ~3.4 GB on disk, nearly all of it cuDNN.
+It is a onedir build on purpose. `--onefile` would unpack the CUDA libraries into a temp
+folder on every single launch. Expect ~1.3 GB on disk, mostly cuBLASLt.
 
 Debugging a build that dies on startup: `$env:DICTATE_CONSOLE='1'` before `pyinstaller`
 makes a console exe so the traceback is visible instead of vanishing with the window.

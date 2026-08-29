@@ -1,0 +1,10 @@
+faster-whisper>=1.2          # pulls ctranslate2, av (container decoding), numpy
+av>=15                       # imported directly, to list audio streams
+numpy>=2                     # imported directly, to hand ffmpeg PCM to the model
+nicegui>=3                   # the floating panel (gui.py)
+pywebview>=6; sys_platform == "win32"   # native frameless window for the panel and the .exe
+
+# GPU only - delete these two lines on a CPU-only machine (~700 MB of CUDA libs).
+# ctranslate2 4.x needs cuBLAS 12 + cuDNN 9; other majors will not load.
+nvidia-cublas-cu12>=12,<13
+nvidia-cudnn-cu12>=9,<10

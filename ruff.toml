@@ -1,0 +1,5 @@
+# lint with: uvx ruff check   (or uvx ruff format --diff)
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B"]
