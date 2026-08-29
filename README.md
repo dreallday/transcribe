@@ -104,6 +104,14 @@ lines only.
 List devices: `ffmpeg -sources pulse` on Linux, `ffmpeg -f avfoundation -list_devices true -i ""`
 on macOS, `ffmpeg -f dshow -list_devices true -i dummy` on Windows.
 
+On Windows there is no `default` capture device to ask for, so the app lists what dshow
+reports, picks the first name containing "mic", and prints its choice. With a capture card
+or virtual audio devices in the machine that guess is often wrong - pass the real one:
+
+```
+transcribe.py --mic -i "audio=Mic In (2- Elgato Wave:XLR)"
+```
+
 Silence detection is a plain RMS gate (`--threshold`, default `0.01`). Nothing showing up?
 Check the mic is actually producing signal:
 
@@ -114,6 +122,84 @@ ffplay /tmp/mictest.wav
 
 Silent file means the OS is not handing over the mic (under WSL, that is the Windows mic
 permission for the terminal app). A quiet-but-audible file means lower `--threshold`.
+
+## Dictation - type into whatever textbox has focus
+
+```bash
+./dictate.sh                     # start it, click into any textbox, talk
+./dictate.sh -l en               # same, language pinned
+```
+
+That is `transcribe.py --mic --type` with the GPU flags. Every finished sentence (same pause
+rule as above) is inserted into the window that currently has focus - browser, editor, chat,
+anything. Nothing is typed while you are mid-sentence, and Enter is never sent, so it cannot
+submit a form or run a command by itself. Ctrl-c stops.
+
+How the text gets there: on Windows/WSL through `powershell.exe` (SendKeys `^v`), on Linux
+through `xdotool` or `wtype`. One long-lived shell is kept open, so a sentence lands in
+about a tenth of a second rather than the ~1s a fresh `powershell.exe` would cost.
+
+Insertion goes via the clipboard, because SendKeys typing mangles shifted punctuation
+(`50% (net)` arrives as `505 9net0`) and cannot type accents at all. Consequences worth
+knowing:
+
+- Your clipboard holds the last dictated sentence while the program runs, and the previous
+  contents are put back when it exits (text only - an image or a copied file is not restored).
+- Apps where `Ctrl+V` is not paste (most terminals want `Ctrl+Shift+V`) will not receive it.
+
+## Panel
+
+`gui.py` is a small floating panel over the dictation loop: a mic button that starts and
+stops transcribing, the last recognised sentence, and a close button. The model is loaded
+once at startup and stays warm, so the mic button toggles instantly.
+
+```bash
+.venv/bin/python gui.py           # same flags as transcribe.py, --mic --type are implied
+```
+
+The bar under the mic is a live input meter (20 updates a second, fast attack and slow
+decay) - it moves even while paused, so you can confirm a device is actually hearing you
+before you start.
+
+The input dropdown lists the real capture devices (dshow on Windows, pulse sources on
+Linux). Switching reopens ffmpeg on the new device without reloading the model, so it takes
+effect immediately.
+
+Where `pywebview` is installed (the Windows build) it opens as a frameless, always-on-top
+window you can drag from anywhere on it. Otherwise it serves `http://localhost:8171` and
+opens it as an Edge app window.
+
+Under WSL that browser fallback cannot be reached from Windows: WSL's Hyper-V firewall
+blocks inbound connections (`Get-NetFirewallHyperVVMSetting` → `DefaultInboundAction: Block`),
+so use the Windows build, or add an inbound rule for the port.
+
+Toggle the mic **before** clicking into the textbox you want to dictate into: clicking the
+panel takes focus, and text goes wherever the focus is.
+
+## Windows build
+
+PyInstaller cannot cross-compile, so the `.exe` is built on Windows with Windows Python
+(3.11+; 3.14 works). From a copy of this repo on a Windows drive:
+
+```powershell
+winget install Gyan.FFmpeg          # if ffmpeg.exe is not already on PATH
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+That makes a venv, installs the requirements plus `pywebview` and `pyinstaller`, and runs
+`dictate.spec`. Output is `dist\dictate\dictate.exe` plus its folder - copy the whole
+folder, not just the exe.
+
+What is inside: ffmpeg, the CUDA runtime (cuBLAS + cuDNN, the bulk of the size), and the
+NiceGUI and faster-whisper assets. What is not: the model weights, which download to
+`%USERPROFILE%\.cache\huggingface` on first launch - so the first start needs a network
+connection and a minute of patience.
+
+It is a onedir build on purpose. `--onefile` would unpack a gigabyte of CUDA DLLs into a
+temp folder on every single launch. Expect ~3.4 GB on disk, nearly all of it cuDNN.
+
+Debugging a build that dies on startup: `$env:DICTATE_CONSOLE='1'` before `pyinstaller`
+makes a console exe so the traceback is visible instead of vanishing with the window.
 
 ## Flags
 
@@ -126,6 +212,7 @@ permission for the terminal app). A quiet-but-audible file means lower `--thresh
 | `-b` | `16` | batch size, lower if VRAM runs out |
 | `-s` | `0` | audio stream index, for multi-track files |
 | `--mic` | off | live-transcribe the microphone |
+| `--type` | off | insert each finished sentence into the focused textbox |
 | `-i` | `default` | mic device for `--mic` |
 | `-o` | none | append `--mic` lines to a file |
 | `--interval` | `1.0` | seconds between live previews of the current sentence |
@@ -133,6 +220,11 @@ permission for the terminal app). A quiet-but-audible file means lower `--thresh
 | `--threshold` | `0.01` | RMS below this counts as silence |
 
 Speed: 30 min of audio in ~15s on an RTX 4070 Ti SUPER (`large-v3-turbo`, float16).
+
+## Disk usage
+
+The build, the venvs and the model cache add up to a lot of gigabytes in a few known
+places. [CLEANUP.md](CLEANUP.md) lists every path with its size and what removes it.
 
 ## GPU not used?
 
